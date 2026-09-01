@@ -1,0 +1,87 @@
+# .github/workflows/ci.yml
+#
+# 4 שלבים לוגיים: build -> test -> cleanup(תמיד) -> deploy(רק בהצלחה)
+#
+# הערה חשובה על הסדר: שלב ה-cleanup (docker compose down -v) חייב לרוץ תמיד
+# (גם אחרי כישלון) כדי לא להשאיר על השרת stack חצי-שבור שתופס את פורט 80
+# ומפריע לריצה הבאה. אבל אם הוא ירוץ *אחרי* deploy, הוא יהרוס את הפריסה
+# שהרגע עלתה בהצלחה! לכן: קודם עולים לבדיקה (test), מנקים את מופע-הבדיקה
+# תמיד (cleanup, if: always()), ורק *אחרי* זה - אם הכל הצליח - עושים deploy
+# אמיתי וסופי שנשאר למעלה (ואליו cleanup כבר לא נוגע).
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+
+# מונע שתי ריצות מקבילות שינסו לתפוס את פורט 80 באותו זמן על אותו שרת -
+# ריצה חדשה תמתין בתור במקום לרוץ יחד עם ריצה קודמת שעדיין לא הסתיימה
+concurrency:
+  group: project4-deploy
+  cancel-in-progress: false
+
+jobs:
+  ci-cd:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- build ---
+      - name: Build images (no cache)
+        run: docker compose build --no-cache
+
+      # --- test ---
+      - name: Start stack for testing
+        run: docker compose up -d
+
+      - name: Wait until all 4 services are healthy (retry loop)
+        run: |
+          echo "Waiting for all services to report healthy..."
+          for i in $(seq 1 30); do
+            unhealthy=0
+            for cid in $(docker compose ps -q); do
+              status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$cid")
+              if [ "$status" != "healthy" ]; then
+                unhealthy=1
+              fi
+            done
+            if [ "$unhealthy" -eq 0 ]; then
+              echo "All services are healthy."
+              docker compose ps
+              exit 0
+            fi
+            echo "Attempt $i/30 - still waiting..."
+            sleep 3
+          done
+          echo "ERROR: not all services became healthy in time"
+          docker compose ps
+          exit 1
+
+      - name: Test endpoints through Nginx
+        run: |
+          curl -sf http://localhost/api/health
+          echo
+          curl -sf http://localhost/api/items
+          echo
+          curl -sf http://localhost/ > /dev/null && echo "Home page OK (200)"
+
+      # --- מדפיס לוגים אוטומטית אם build/test נכשלו, לפני שמנקים הכל ---
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      # --- cleanup: תמיד רץ, גם אחרי כישלון, מוריד הכל כולל volumes ---
+      # זה מפנה את פורט 80 ומנקה נתוני בדיקה - בין אם הבדיקות עברו ובין אם לא
+      - name: Cleanup test instance
+        if: always()
+        run: docker compose down -v
+
+      # --- deploy: רק אם כל מה שלמעלה הצליח - זו הפריסה הסופית שנשארת רצה ---
+      - name: Deploy final stack
+        if: success()
+        run: docker compose up -d
+
+      - name: Show final status
+        if: success()
+        run: docker compose ps

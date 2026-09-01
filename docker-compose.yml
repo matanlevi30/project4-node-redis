@@ -53,10 +53,10 @@ services:
       - ./nginx/static:/usr/share/nginx/html/static:ro
     depends_on:
       - api
-    # healthcheck מבוסס wget (זמין מובנה ב-busybox של nginx:alpine)
+    # healthcheck מבוסס nginx -t - לא תלוי ב-wget/curl שלא בהכרח מותקנים
     # נדרש כדי שה-CI יוכל לחכות שכל 4 השירותים healthy, לא רק db/cache
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      test: ["CMD", "nginx", "-t"]
       interval: 5s
       timeout: 5s
       retries: 10
